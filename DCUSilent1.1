@@ -1,0 +1,110 @@
+<#
+.SYNOPSIS
+  Runs Dell Command | Update silently and notifies user when complete.
+
+.REQUIREMENTS
+  - Dell Command | Update installed
+  - Run as Administrator
+#>
+
+#region Helpers
+
+function Test-IsDell {
+    try {
+        $cs = Get-CimInstance -ClassName Win32_ComputerSystem -ErrorAction Stop
+        return ($cs.Manufacturer -match 'Dell')
+    } catch {
+        return $false
+    }
+}
+
+function Get-DCUCliPath {
+    $paths = @(
+        "$env:ProgramFiles\Dell\CommandUpdate\dcu-cli.exe",
+        "$env:ProgramFiles(x86)\Dell\CommandUpdate\dcu-cli.exe"
+    )
+    return $paths | Where-Object { Test-Path $_ } | Select-Object -First 1
+}
+
+function Ensure-Dir {
+    param([string]$Path)
+    if (-not (Test-Path $Path)) {
+        New-Item -Path $Path -ItemType Directory -Force | Out-Null
+    }
+}
+
+function Show-CompletionNotification {
+    param(
+        [string]$Title,
+        [string]$Message
+    )
+
+    Add-Type -AssemblyName System.Windows.Forms | Out-Null
+    Add-Type -AssemblyName System.Drawing | Out-Null
+
+    $notify = New-Object System.Windows.Forms.NotifyIcon
+    $notify.Icon = [System.Drawing.SystemIcons]::Information
+    $notify.BalloonTipTitle = $Title
+    $notify.BalloonTipText  = $Message
+    $notify.Visible = $true
+
+    $notify.ShowBalloonTip(10000)
+    Start-Sleep -Seconds 12
+    $notify.Dispose()
+}
+
+function Run-DCUCommandHidden {
+    param(
+        [string]$ExePath,
+        [string]$Arguments,
+        [string]$LogPath
+    )
+
+    $process = Start-Process `
+        -FilePath $ExePath `
+        -ArgumentList $Arguments `
+        -WindowStyle Hidden `
+        -Wait `
+        -PassThru
+
+    Add-Content -Path $LogPath -Value ("`r`nExitCode: {0}`r`nTimestamp: {1}`r`n" -f $process.ExitCode, (Get-Date))
+    return $process.ExitCode
+}
+
+#endregion Helpers
+
+#region Main
+
+if (-not (Test-IsDell)) {
+    Show-CompletionNotification -Title "Dell Updates" -Message "Skipped: Not a Dell system."
+    exit 0
+}
+
+$dcuPath = Get-DCUCliPath
+if (-not $dcuPath) {
+    Show-CompletionNotification -Title "Dell Updates" -Message "Skipped: Dell Command Update not found."
+    exit 1
+}
+
+# Log directory: C:\Windows\Temp\AddFive\DCU
+$logRoot = "C:\Windows\Temp\AddFive\DCU"
+Ensure-Dir -Path $logRoot
+
+$timestamp = Get-Date -Format "yyyyMMdd-HHmmss"
+$scanLog   = "$logRoot\DCU-Scan-$timestamp.log"
+$applyLog  = "$logRoot\DCU-Apply-$timestamp.log"
+
+# Scan silently
+$scanArgs = "/scan -silent -outputLog=`"$scanLog`""
+$scanExit = Run-DCUCommandHidden -ExePath $dcuPath -Arguments $scanArgs -LogPath $scanLog
+
+# Apply updates silently without forced reboot
+$applyArgs = "/applyUpdates -silent -outputLog=`"$applyLog`" -reboot=disable"
+$applyExit = Run-DCUCommandHidden -ExePath $dcuPath -Arguments $applyArgs -LogPath $applyLog
+
+# Notify after completion
+Show-CompletionNotification -Title "Dell Updates Complete" -Message "Dell Command Update has finished installing available updates."
+
+exit $applyExit
+
+#endregion Main
